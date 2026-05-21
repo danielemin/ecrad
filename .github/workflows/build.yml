@@ -181,6 +181,25 @@ jobs:
           ${ECRAD_TOOLS}/install-netcdf-fortran.sh --prefix ${{ env.DEPS_DIR }}/netcdf --netcdf-root ${NETCDF_ROOT}
         fi
 
+    - name: Set Build & Test Environment
+      run: |
+
+        if [[ "${{ matrix.compiler }}" =~ "nvhpc" ]]; then
+          # Add a -tp=haswell flag, which is needed to avoid nvfortran errors of "Error during math dispatching processing..."
+          # It seems the compiler detects an incompatible target processor on some of the runners,
+          # in particular -tp=znver4 seems incompatible with "AMD EPYC 9V74 80-Core Processor" as shown by /proc/cpuinfo
+          NVHPC_TARGET_FLAG="-tp=haswell"
+          CFLAGS="${CFLAGS:+$CFLAGS }${NVHPC_TARGET_FLAG}"
+          CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }${NVHPC_TARGET_FLAG}"
+          FFLAGS="${FFLAGS:+$FFLAGS }${NVHPC_TARGET_FLAG}"
+          FCFLAGS="${FCFLAGS:+$FCFLAGS }${NVHPC_TARGET_FLAG}"
+        fi
+
+        [ -z ${CFLAGS+x}   ] || echo "CFLAGS=${CFLAGS}"     >> $GITHUB_ENV
+        [ -z ${CXXFLAGS+x} ] || echo "CXXFLAGS=${CXXFLAGS}" >> $GITHUB_ENV
+        [ -z ${FFLAGS+x}   ] || echo "FFLAGS=${FFLAGS}"     >> $GITHUB_ENV
+        [ -z ${FCFLAGS+x}  ] || echo "FCFLAGS=${FCFLAGS}"   >> $GITHUB_ENV
+
     - name: Build & Test
       id: build-test
       uses: ecmwf-actions/build-package@v2
