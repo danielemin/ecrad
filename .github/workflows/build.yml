@@ -45,6 +45,10 @@ jobs:
             compiler_cxx: g++-12
             compiler_fc: gfortran-12
             caching: true
+            compile_flags:
+              Debug: -O0 -g -fcheck=bounds -fbacktrace -finit-real=snan
+              Bit: -O2 -DNDEBUG -fno-range-check
+              Release: -O3 -DNDEBUG -funroll-all-loops -finline-functions
 
           - name: linux nvhpc-24.3
             os: ubuntu-22.04
@@ -53,7 +57,10 @@ jobs:
             compiler_cxx: nvc++
             compiler_fc: nvfortran
             caching: true
-            # caching: false
+            compile_flags:
+              Debug: -O0 -g -check all
+              Bit: -O3 -fast -tp=haswell
+              Release: -O3 -fast -tp=haswell
 
           - name : linux intel-classic
             os: ubuntu-22.04
@@ -62,6 +69,10 @@ jobs:
             compiler_cxx: icpc
             compiler_fc: ifort
             caching: true
+            compile_flags:
+              Debug: -O0 -g -traceback -heap-arrays 32 -check all
+              Bit: -O2 -DNDEBUG -funroll-loops -heap-arrays 32
+              Release: -O3 -DNDEBUG -funroll-loops -heap-arrays 32
 
           - name : linux intel-llvm
             os: ubuntu-24.04
@@ -70,6 +81,10 @@ jobs:
             compiler_cxx: icpx
             compiler_fc: ifx
             caching: true
+            compile_flags:
+              Debug: -O0 -g -traceback -heap-arrays 32 -check all
+              Bit: -O2 -DNDEBUG -funroll-loops -heap-arrays 32
+              Release: -O3 -DNDEBUG -funroll-loops -heap-arrays 32
 
           # SPARTACUS solver tests are prohibitively slow with Intel Debug
           # builds (-O0 -check all) due to expensive matrix exponentials,
@@ -181,28 +196,9 @@ jobs:
           ${ECRAD_TOOLS}/install-netcdf-fortran.sh --prefix ${{ env.DEPS_DIR }}/netcdf --netcdf-root ${NETCDF_ROOT}
         fi
 
-    - name: Set Build & Test Environment
-      run: |
-
-        if [[ "${{ matrix.compiler }}" =~ "nvhpc" ]]; then
-          # Add a -tp=haswell flag, which is needed to avoid nvfortran errors of "Error during math dispatching processing..."
-          # It seems the compiler detects an incompatible target processor on some of the runners,
-          # in particular -tp=znver4 seems incompatible with "AMD EPYC 9V74 80-Core Processor" as shown by /proc/cpuinfo
-          NVHPC_TARGET_FLAG="-tp=haswell"
-          CFLAGS="${CFLAGS:+$CFLAGS }${NVHPC_TARGET_FLAG}"
-          CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }${NVHPC_TARGET_FLAG}"
-          FFLAGS="${FFLAGS:+$FFLAGS }${NVHPC_TARGET_FLAG}"
-          FCFLAGS="${FCFLAGS:+$FCFLAGS }${NVHPC_TARGET_FLAG}"
-        fi
-
-        [ -z ${CFLAGS+x}   ] || echo "CFLAGS=${CFLAGS}"     >> $GITHUB_ENV
-        [ -z ${CXXFLAGS+x} ] || echo "CXXFLAGS=${CXXFLAGS}" >> $GITHUB_ENV
-        [ -z ${FFLAGS+x}   ] || echo "FFLAGS=${FFLAGS}"     >> $GITHUB_ENV
-        [ -z ${FCFLAGS+x}  ] || echo "FCFLAGS=${FCFLAGS}"   >> $GITHUB_ENV
-
-    - name: Build & Test
-      id: build-test
-      uses: ecmwf-actions/build-package@v2
+    - name: Build
+      id: build
+      uses: ecmwf/build-package@v2
       with:
         save_cache: false
         self_coverage: false
@@ -214,8 +210,8 @@ jobs:
           ecmwf-ifs/fiat
         dependency_branch: develop
         dependency_cmake_options: |
-          ecmwf-ifs/fiat: "-G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DENABLE_TESTS=OFF"
-        cmake_options:    "-G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_options }} -DENABLE_SINGLE_PRECISION=ON -DENABLE_BITIDENTITY_TESTING=ON"
+          ecmwf-ifs/fiat: "-G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}  -DENABLE_TESTS=OFF"
+        cmake_options:    "-G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_options }} -DECRAD_Fortran_FLAGS='${{ matrix.compile_flags[ matrix.build_type ] }}' -DENABLE_SINGLE_PRECISION=ON -DENABLE_BITIDENTITY_TESTING=ON'"
         self_build: true
         self_test: false
 
