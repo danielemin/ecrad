@@ -1,17 +1,24 @@
 name: check-pr
 
+concurrency:
+  group: prtk-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
     branches: [ master, develop ]
 
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   check-pr:
+    if: github.repository_owner == 'ecmwf-ifs'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
 
       - name: Checkout code
@@ -27,12 +34,16 @@ jobs:
 
       - name: Install prtk
         env:
-            PRTK_READ_ACCESS_TOKEN: ${{ secrets.PRTK_READ_ACCESS }}
+          PRTK_READ_ACCESS_TOKEN: ${{ secrets.PRTK_READ_ACCESS }}
         run: |
           uv tool install "git+https://${PRTK_READ_ACCESS_TOKEN}@github.com/ecmwf-ifs/prtk"
 
-      - name: Assign reviewers
+      - name: Run prtk checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          prtk assign-reviewers --pr-number ${{ github.event.pull_request.number }}
+        run: >-
+          prtk check
+          --pr-number "${{ github.event.pull_request.number }}"
+          --default-branch "${{ github.event.repository.default_branch }}"
+          --event-name "${{ github.event_name }}"
+          --event-action "${{ github.event.action }}"
