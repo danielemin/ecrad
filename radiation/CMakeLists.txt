@@ -65,6 +65,8 @@ set( radiation_SOURCES
         radiation_tripleclouds_lw.F90
         radiation_tripleclouds_sw.F90
         radiation_two_stream.F90
+        radiation_photolysis.F90
+        interpolation.F90
 )
 
 ecbuild_add_library(
