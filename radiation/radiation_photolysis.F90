@@ -13,6 +13,8 @@
 ! Email:   r.j.hogan@ecmwf.int
 !
 
+#include "ecrad_config.h"
+
 module radiation_photolysis
 
   use parkind1, only : jprb
@@ -82,12 +84,16 @@ contains
   ! list of processes to consider
   subroutine configure(this, config, file_name, processes, iverbose)
 
-    use easy_netcdf,     only : netcdf_file
-    use radiation_config,only : config_type
-    use radiation_io,    only : nulout, radiation_abort
-    use radiation_constants, only : PlanckConstant, SpeedOfLight
-    use interpolation,   only : interpolate
-    use yomhook,         only : lhook, dr_hook, jphook
+#ifdef EASY_NETCDF_READ_MPI
+    use easy_netcdf_read_mpi, only : netcdf_file    
+#else
+    use easy_netcdf,          only : netcdf_file
+#endif
+    use radiation_config,     only : config_type
+    use radiation_io,         only : nulout, radiation_abort
+    use radiation_constants,  only : PlanckConstant, SpeedOfLight
+    use interpolation,        only : interpolate
+    use yomhook,              only : lhook, dr_hook, jphook
 
     class(photolysis_type), intent(inout) :: this
     ! Name of file containing photolysis cross-sections
