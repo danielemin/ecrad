@@ -104,6 +104,9 @@ program ecrad_photolysis_driver
   ! Are any variables out of bounds?
   logical :: is_out_of_bounds
 
+  ! Do we store photolysis rates at half levels?
+  logical :: do_half_level_photolysis_rates
+
   ! Photolysis data 
   logical                      :: do_photolysis        
   type(photolysis_type)        :: photolysis
@@ -111,7 +114,7 @@ program ecrad_photolysis_driver
   integer :: jcol
   
   ! Fortran array of strings to store required photolysis processes
-  integer, parameter :: NPhotolysisProcesses = 5
+  integer, parameter :: NPhotolysisProcesses = 55
   character(len=NMaxProcessNameLen) :: photolysis_processes(NPhotolysisProcesses)
 
 !  integer    :: iband(20), nweights
@@ -171,10 +174,25 @@ program ecrad_photolysis_driver
   ! Configure photolysis, currently hardwiring both the required
   ! processes and the configuration file to use, but ideally both will
   ! be taken from a namelist in future
-  photolysis_processes = [character(len=NMaxProcessNameLen) :: "hobr", "o3_o", "o3_o1d", "no2", "cfc12"]
+  !  photolysis_processes = [character(len=NMaxProcessNameLen) :: "hobr", "o3_o", "o3_o1d", "no2", "cfc12"]
+  !call photolysis%configure(config, "photolysis_CY50R1_sb15d.nc", &
+  !     &                    photolysis_processes, iverbose=driver_config%iverbose)
+
+  ! Natively photolysis is computed on half-levels, but can be
+  ! converted to full-level values (see radiation_photolysis.F90)
+  do_half_level_photolysis_rates = .true.
   
-  call photolysis%configure(config, "photolysis_CY50R1_sb15d.nc", &
-       &                    photolysis_processes, iverbose=driver_config%iverbose)
+  photolysis_processes = [character(len=NMaxProcessNameLen) &
+       &  :: "hobr", "br2", "brcl", "bro", "brono2_br", "brono2_bro", "chbr3", "cl2", "oclo", "cl2o2", &
+       &     "hocl", "clono2_cl", "clono2_clo", "clno2", "cloo", "clo", "hcl", "cfc12", "cfc115", "ccl4", &
+       &     "ch3ccl3", "ch3cl", "cfc113", "hcfc22", "ha1211", "ha1301", "ch3br", "cfc114", "cfc11", &
+       &     "ch2br2", "no2", "n2o", "no3_o", "no3_o2", "n2o5", "no", "ch2o_hco", "ch2o_co", "ch3ooh", &
+       &     "ch4", "co2", "ho2", "h2o2_oh", "h2o2_ho2", "hno3", "ho2no2_ho2", "ho2no2_oh", "h2o", "h2so4", &
+       &     "so3", "ocs", "o3_o1d", "o3_o", "o2_o", "o2_o1d"]
+  
+  call photolysis%configure(config, "crs-qy_sb15d_subset.nc", &
+       &                    photolysis_processes, iverbose=driver_config%iverbose, &
+       &                    do_half_level_rates=do_half_level_photolysis_rates)
 
   ! --------------------------------------------------------
   ! Section 3: Read input data file
@@ -284,7 +302,11 @@ program ecrad_photolysis_driver
   call flux%allocate(config, 1, ncol, nlev)
 
   if (do_photolysis) then
-    allocate(photolysis_rate(photolysis%nproc,nlev,ncol))
+    if (do_half_level_photolysis_rates) then
+      allocate(photolysis_rate(photolysis%nproc,nlev+1,ncol))
+    else
+      allocate(photolysis_rate(photolysis%nproc,nlev,ncol))
+    end if
   end if
 
   if (driver_config%iverbose >= 2) then

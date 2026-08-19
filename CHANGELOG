@@ -2,6 +2,11 @@ version 1.7.2
 	- Optionally read reference_total_solar_irradiance from solar
 	  ecCKD gas optics files in case the file is not intended to span
 	  the entire solar spectrum
+	- Photolysis of O2 uses ecCKD absorption spectrum as more accurate
+	  at resolving impact of Schumann-Runge lines. Photolysis can now be
+	  calculated either on half levels or full levels. More CAMS
+	  photolysis processes represented in data/crs-qy_sb15d_subset.nc
+	  file.
 
 version 1.7.1 (19 August 2025)
 	- radiation_ifs_rrtm: refactored loop and if structure
