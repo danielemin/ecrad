@@ -13,6 +13,8 @@
 ! Email:   r.j.hogan@ecmwf.int
 !
 
+#include "ecrad_config.h"
+
 module radiation_photolysis
 
   use parkind1, only : jprb
@@ -67,10 +69,14 @@ module radiation_photolysis
     ! First temperature in look-up table and spacing, in Kelvin
     real(jprb) :: temperature1, dtemperature
 
+    ! Do we return rates on half-levels?
+    logical :: do_half_level_rates = .false.
+
   contains
     procedure :: configure
     procedure :: calculate
     procedure :: save
+    procedure :: get_absorption_from_ckd
     
   end type photolysis_type
   
@@ -80,9 +86,14 @@ contains
   !---------------------------------------------------------------------
   ! Configure the photolysis_type structure from a netCDF file and a
   ! list of processes to consider
-  subroutine configure(this, config, file_name, processes, iverbose)
+  subroutine configure(this, config, file_name, processes, &
+       &               iverbose, do_half_level_rates, use_ckd_for_o2)
 
+#ifdef EASY_NETCDF_READ_MPI
+    use easy_netcdf_read_mpi, only : netcdf_file    
+#else
     use easy_netcdf,     only : netcdf_file
+#endif
     use radiation_config,only : config_type
     use radiation_io,    only : nulout, radiation_abort
     use radiation_constants, only : PlanckConstant, SpeedOfLight
@@ -94,10 +105,20 @@ contains
     type(config_type),      intent(in)    :: config
     ! Configuration structure, only used for the data directory
     character(len=*),       intent(in)    :: file_name
-    ! Array of strings containing the photolysis processes that are required
+    ! Array of strings containing the photolysis processes that are
+    ! required. These are of the form "gas[_product][:CKD]",
+    ! e.g. o2_o1d:CKD, which means photolysis of O2 to produce the
+    ! O(1D) oxygen radical, and to obtain the cross sections from the
+    ! CKD gas optics model rather than the photolysis netCDF file.
     character(len=*),       intent(in)    :: processes(:)
     ! Verbosity level from 1 (least) to 5 (most verbose)
     integer, optional,      intent(in)    :: iverbose
+    ! Do we return photolysis rates on half levels?
+    logical, optional,      intent(in)    :: do_half_level_rates
+    ! Do we get the cross-sections of molecular oxygen from the CKD
+    ! gas optics model?  This is usualy needed because the
+    ! Schumann-Runge O2 absorption lines are so fine. Default true.
+    logical, optional,      intent(in)    :: use_ckd_for_o2
     
     type(netcdf_file) :: file
 
@@ -125,6 +146,11 @@ contains
     ! of the solar energy at a particular wavenumber is dealt with by
     ! each g-point.
     real(jprb), allocatable :: gpoint_fraction_renorm(:,:)
+
+    ! Names of photolysis process and gas (e.g. o2_o1d and o2)
+    character(len=NMaxProcessNameLen) :: process_name, gas_name
+    ! Number of characters in process_name and gas_name
+    integer :: ilenprocname, ilengasname
     
     ! Number of wavenumbers in ecCKD spectral description
     integer :: nwavn
@@ -132,9 +158,9 @@ contains
     ! Number of wavelengths for a single process in photolysis file
     integer :: nwavl
 
-    ! Loop indices for processes and temperatures
-    integer :: jproc, jt, jg
-
+    ! Loop indices for processes, temperatures and characters
+    integer :: jproc, jt, jg, jchar
+    
     ! Is the absorption cross-section of the current process
     ! temperature dependent?
     logical :: is_temperature_dependent
@@ -142,8 +168,14 @@ contains
     ! Is the quantum yield of the current process temperature
     ! dependent?
     logical :: is_quantum_yield_t_dependent
+
+    ! Do we take the absorption cross-section from the CKD file?  This
+    ! is appropriate for molecular oxygen - it is triggered if the
+    ! absorption cross-section is missing from the photolysis file.
+    logical :: is_absorption_from_ckd
     
     integer :: iverbose_local
+    logical :: use_ckd_for_o2_local
     
     real(jphook) :: hook_handle
     
@@ -155,6 +187,12 @@ contains
       iverbose_local = 3
     end if
 
+    if (present(use_ckd_for_o2)) then
+      use_ckd_for_o2_local = use_ckd_for_o2
+    else
+      use_ckd_for_o2_local = .true.
+    end if
+    
     associate(ckd_model => config%gas_optics_sw)
     
     if (file_name(1:1) == '/' .or. file_name(1:1) == '.') then
@@ -230,11 +268,50 @@ contains
     
     ! Loop over requested processes
     do jproc = 1,this%nproc
-      this%process_names(jproc) = trim(processes(jproc))
+      
+      is_absorption_from_ckd = .false.
+      ! Find the process name, checking for a ":CKD" suffix
+      ilenprocname = len_trim(processes(jproc))
+      if (ilenprocname > 4) then
+        if (processes(jproc)(ilenprocname-3:ilenprocname) == ':CKD') then
+          process_name = processes(jproc)(1:ilenprocname-4)
+          is_absorption_from_ckd = .true.
+        else
+          process_name = trim(processes(jproc))
+        end if
+      else
+        process_name = trim(processes(jproc))
+      end if
+      this%process_names(jproc) = trim(process_name)
+      
+      ! Find the gas name, checking for an underscore
+      ilengasname = ilenprocname
+      do jchar = 2,ilenprocname
+        if (process_name(jchar:jchar) == '_') then
+          ilengasname = jchar - 1
+          exit
+        end if
+      end do
+      gas_name = process_name(1:ilengasname)
+
+      if (use_ckd_for_o2_local .and. trim(gas_name) == 'o2') then
+        is_absorption_from_ckd = .true.
+      end if
+      
       ! Load photolysis data for this process
-      call file%get(trim(processes(jproc)) // "_wavelength", wavelength_nm)
-      call file%get(trim(processes(jproc)) // "_quantum_yield", quantum_yield)
-      call file%get(trim(processes(jproc)) // "_cross_section", cross_section_cm2)
+      call file%get(trim(process_name) // "_wavelength", wavelength_nm)
+      call file%get(trim(process_name) // "_quantum_yield", quantum_yield)
+
+      if (.not. is_absorption_from_ckd) then
+        call file%get(trim(process_name) // "_cross_section", cross_section_cm2)
+        if (size(cross_section_cm2,2) == this%ntemperature) then
+          is_temperature_dependent = .true.
+        else
+          is_temperature_dependent = .false.
+        end if
+      else
+        is_temperature_dependent = .true.
+      end if
 
       ! Interpolate on to ecCKD wavenumber grid
       nwavl = size(wavelength_nm)
@@ -242,12 +319,6 @@ contains
       allocate(wavenumber_cm1(nwavl))
       wavenumber_cm1 = 1.0e7_jprb/wavelength_nm(nwavl:1:-1)
 
-      if (size(cross_section_cm2,2) == this%ntemperature) then
-        is_temperature_dependent = .true.
-      else
-        is_temperature_dependent = .false.
-      end if
-      
       if (size(quantum_yield,2) == this%ntemperature) then
         is_quantum_yield_t_dependent = .true.
       else
@@ -257,12 +328,12 @@ contains
       if (iverbose_local >= 2) then
         if (is_temperature_dependent .or. is_quantum_yield_t_dependent) then
           write(nulout,'(a,a,a,f0.1,a,f0.1,a)') '  Temperature-dependent photolysis "', &
-               &  trim(processes(jproc)), &
+               &  trim(process_name), &
                &  '" sensitive to wavenumbers ', wavenumber_cm1(1), '-', &
                &  wavenumber_cm1(nwavl), ' cm-1'
         else
           write(nulout,'(a,a,a,f0.1,a,f0.1,a)') '  Temperature-independent photolysis "', &
-               &  trim(processes(jproc)), &
+               &  trim(process_name), &
                &  '" sensitive to wavenumbers ', wavenumber_cm1(1), '-', &
                &  wavenumber_cm1(nwavl), ' cm-1'
         end if
@@ -272,7 +343,7 @@ contains
            &  .or. wavenumber_int_cm1(nwavn) < wavenumber_cm1(nwavl)) then
         if (iverbose >= 1) then
           write(nulout,'(a,a,a,f0.1,a,f0.1,a)') '    Warning: photolysis of "', &
-               &  trim(processes(jproc)), &
+               &  trim(process_name), &
                &  '" sensitive to wavenumbers out of available range ', &
                &  wavenumber_int_cm1(1), '-', wavenumber_int_cm1(nwavn), ' cm-1'
         end if
@@ -280,7 +351,23 @@ contains
 
       ! Need to cope with the case of either of the absorption
       ! cross-section or the quantum yield being temperature dependent
-      if (is_temperature_dependent .or. is_quantum_yield_t_dependent) then
+      if (is_absorption_from_ckd) then
+        call this%get_absorption_from_ckd(trim(gas_name), ckd_model, &
+             &                            this%cross_section_lut(jproc,:,:))
+        do jt = 1,this%ntemperature
+          if (is_quantum_yield_t_dependent) then
+            call interpolate(wavenumber_cm1, quantum_yield(nwavl:1:-1,jt), &
+                 &           wavenumber_int_cm1, quantum_yield_int, 0.0_jprb)
+          else
+            call interpolate(wavenumber_cm1, quantum_yield(nwavl:1:-1,1), &
+                 &           wavenumber_int_cm1, quantum_yield_int, 0.0_jprb)
+          end if
+          photolysis_multiplier = quantum_yield_int * solar_photon_flux;
+          this%cross_section_lut(jproc,:,jt) = this%cross_section_lut(jproc,:,jt) &
+               &  * matmul(photolysis_multiplier, gpoint_fraction_renorm) &
+               &  / ckd_model%spectral_def%solar_irradiance
+        end do
+      else if (is_temperature_dependent .or. is_quantum_yield_t_dependent) then
         do jt = 1,this%ntemperature
           ! Interpolate to wavenumber grid
           if (is_temperature_dependent) then
@@ -298,7 +385,7 @@ contains
                  &           wavenumber_int_cm1, quantum_yield_int, 0.0_jprb)
           end if
           ! 1e-4 converts cross section from cm2 to m2
-          photolysis_multiplier = 1.0e-4 * cross_section_int_cm2 * quantum_yield_int &
+          photolysis_multiplier = 1.0e-4_jprb * cross_section_int_cm2 * quantum_yield_int &
                &                * solar_photon_flux;
           this%cross_section_lut(jproc,:,jt) &
                &  = matmul(photolysis_multiplier, gpoint_fraction_renorm) &
@@ -311,7 +398,7 @@ contains
              &           wavenumber_int_cm1, cross_section_int_cm2, 0.0_jprb)
         call interpolate(wavenumber_cm1, quantum_yield(nwavl:1:-1,1), &
              &           wavenumber_int_cm1, quantum_yield_int, 0.0_jprb)
-        photolysis_multiplier = 1.0e-4 * cross_section_int_cm2 * quantum_yield_int &
+        photolysis_multiplier = 1.0e-4_jprb * cross_section_int_cm2 * quantum_yield_int &
              &                * solar_photon_flux;
         this%cross_section_lut(jproc,:,1) &
              &  = matmul(photolysis_multiplier, gpoint_fraction_renorm) &
@@ -323,9 +410,17 @@ contains
       deallocate(wavelength_nm)
       deallocate(wavenumber_cm1)
       deallocate(quantum_yield)
-      deallocate(cross_section_cm2)
+      if (allocated(cross_section_cm2)) then
+        deallocate(cross_section_cm2)
+      end if
     end do
     
+    if (present(do_half_level_rates)) then
+      this%do_half_level_rates = do_half_level_rates
+    else
+      this%do_half_level_rates = .false.
+    end if
+ 
     call file%close()
 
     end associate
@@ -423,7 +518,7 @@ contains
         if (wtemp < 1.0_jprb) then
           itemp = 1
           wtemp = 0.0_jprb
-        elseif (wtemp >= this%ntemperature) then
+        else if (wtemp >= this%ntemperature) then
           itemp = this%ntemperature-1
           wtemp = 1.0_jprb
         else
@@ -437,27 +532,31 @@ contains
         rates_hl(:,jlev) = matmul(cross_section, actinic_flux)
       end do
 
-      ! Loop over full levels
-      do jlay = il1,il2
-        ! Assume the photolysis rates for each process vary exponentially within each layer
-        do jproc = 1,this%nproc
-          if (rates_hl(jproc,jlay+1) > 0.99_jprb * rates_hl(jproc,jlay)) then
-            ! Optically thin layer: very small vertical variation of
-            ! rates so take average of values at top and bottom
-            ! of layer
-            rates(jproc,jlay) = 0.5_jprb * (rates_hl(jproc,jlay) + rates_hl(jproc,jlay+1))
-          elseif (rates_hl(jproc,jlay) <= 0.0_jprb) then
-            ! No flux
-            rates(jproc,jlay) = 0.0_jprb
-          else
-            ! Assume an exponential variation of actinic flux through
-            ! the layer and calculate the layer-mean value
-            rates(jproc,jlay) = (rates_hl(jproc,jlay+1) - rates_hl(jproc,jlay)) &
-                 &      / log(max(rates_hl(jproc,jlay+1)/rates_hl(jproc,jlay),tiny(1.0_jprb)))
-          end if
+      if (this%do_half_level_rates) then
+        ! Copy the half-level rates to the output array
+        rates = rates_hl
+      else
+        ! Loop over full levels
+        do jlay = il1,il2
+          ! Assume the photolysis rates for each process vary exponentially within each layer
+          do jproc = 1,this%nproc
+            if (rates_hl(jproc,jlay+1) > 0.99_jprb * rates_hl(jproc,jlay)) then
+              ! Optically thin layer: very small vertical variation of
+              ! rates so take average of values at top and bottom
+              ! of layer
+              rates(jproc,jlay) = 0.5_jprb * (rates_hl(jproc,jlay) + rates_hl(jproc,jlay+1))
+            else if (rates_hl(jproc,jlay) <= 0.0_jprb) then
+              ! No flux
+              rates(jproc,jlay) = 0.0_jprb
+            else
+              ! Assume an exponential variation of actinic flux through
+              ! the layer and calculate the layer-mean value
+              rates(jproc,jlay) = (rates_hl(jproc,jlay+1) - rates_hl(jproc,jlay)) &
+                   &      / log(max(rates_hl(jproc,jlay+1)/rates_hl(jproc,jlay),tiny(1.0_jprb)))
+            end if
+          end do
         end do
-      end do
-      
+      end if
     else
       ! Sun below horizon
       rates(:,:) = 0.0_jprb
@@ -509,7 +608,11 @@ contains
     nlev = size(rates,2)
     
     call out_file%define_dimension("column", ncol)
-    call out_file%define_dimension("level",  nlev)
+    if (this%do_half_level_rates) then
+      call out_file%define_dimension("half_level",  nlev)
+    else
+      call out_file%define_dimension("level",  nlev)
+    end if
 
     ! Put global attributes
     call out_file%put_global_attributes( &
@@ -519,13 +622,23 @@ contains
          &   source_str="ecRad offline radiation model")
 
     do jproc = 1,this%nproc
-      call out_file%define_variable(trim(this%process_names(jproc)) // "_photolysis_rate", &
-           &  long_name=trim(this%process_names(jproc)) // " photolysis rate", units_str="s-1", &
-           &  dim2_name="column", dim1_name="level")
+      if (this%do_half_level_rates) then
+        call out_file%define_variable(trim(this%process_names(jproc)) // "_photolysis_rate_hl", &
+             &  long_name=trim(this%process_names(jproc)) // " photolysis rate at half-levels", units_str="s-1", &
+             &  dim2_name="column", dim1_name="half_level")
+      else
+        call out_file%define_variable(trim(this%process_names(jproc)) // "_photolysis_rate", &
+             &  long_name=trim(this%process_names(jproc)) // " photolysis rate", units_str="s-1", &
+             &  dim2_name="column", dim1_name="level")
+      end if
     end do
 
     do jproc = 1,this%nproc
-      call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate", rates(jproc,:,:))
+      if (this%do_half_level_rates) then
+        call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate_hl", rates(jproc,:,:))
+      else
+        call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate", rates(jproc,:,:))
+      end if
     end do
 
     call out_file%close()
@@ -533,6 +646,138 @@ contains
     if (lhook) call dr_hook('radiation_photolysis:save',1,hook_handle)
 
   end subroutine save
+
+  !---------------------------------------------------------------------
+  ! Get the absorption coefficients for each g-point from the CKD
+  ! model for a particular gas
+  subroutine get_absorption_from_ckd(this, gas_name, ckd_model, cross_section)
+
+    use radiation_io,    only : nulout, nulerr, radiation_abort
+    use yomhook,         only : lhook, dr_hook, jphook
+    use radiation_gas_constants, only : GasLowerCaseName, NMaxGases
+    use radiation_constants, only : AvogadroConstant
+    use radiation_ecckd, only : ckd_model_type
+    use radiation_ecckd_gas
+
+    ! Photolysis calculations do not account for the pressure of the
+    ! gas, so we have to choose which pressure to read from the CKD
+    ! look-up table.  Since this routine is likely to only be called
+    ! for molecular oxygen which is important only near the model top,
+    ! we take the second pressure in the CKD look-up table from the
+    ! top.
+    !integer, parameter :: IRefPressure = 2
+    integer, parameter :: IRefPressure = 10
     
+    class(photolysis_type), intent(inout)      :: this
+    character(len=*),       intent(in)         :: gas_name
+    type(ckd_model_type),   intent(in), target :: ckd_model
+    real(jprb),             intent(out)        :: cross_section(:,:) ! (ng,ntemp)
+
+    ! Molar absorption, dimensioned (ng,ntemp)
+    real(jprb), pointer :: molar_abs(:,:)
+
+    ! Index to and weight of first interpolation point; second is i1+1, (1.0-weight1)
+    integer :: i1
+    real(jprb) :: weight1, temperature
+    
+    integer :: i_gas_code, jgas, jtemp
+    integer :: i_target_gas, i_composite_gas    
+    
+    real(jphook) :: hook_handle
+
+    if (lhook) call dr_hook('radiation_photolysis:get_absorption_from_ckd',0,hook_handle)
+
+    ! First convert gas_name to a numerical code
+    i_gas_code = 0
+    do jgas = 1, NMaxGases
+      if (gas_name == trim(GasLowerCaseName(jgas))) then
+        i_gas_code = jgas
+        exit
+      end if
+    end do
+    
+    if (i_gas_code == 0) then
+      write(nulerr,'(a,a,a)') '*** Error: absorption coefficients of gas "', &
+           &  gas_name, '" are not available in ecCKD to use for photolysis'
+      call radiation_abort('Radiation configuration error')
+    end if
+    
+    ! Now find it in the list of CKD gases
+    i_target_gas    = 0
+    i_composite_gas = 0
+    do jgas = 1, ckd_model%ngas
+      associate (single_gas => ckd_model%single_gas(jgas))
+        if (single_gas%i_gas_code == i_gas_code) then
+          i_target_gas = jgas
+        else if (single_gas%i_gas_code == 0) then
+          i_composite_gas = jgas
+        end if
+      end associate
+    end do
+
+    if (i_target_gas == 0) then    
+      if (i_composite_gas == 0) then
+        write(nulerr,'(a,a,a)') '*** Error: could not find absorption coefficients of gas "', &
+             &  gas_name, '" for photolysis in current ecCKD gas-optics scheme'
+        call radiation_abort('Radiation configuration error')
+      elseif (i_gas_code /= IO2) then
+        write(nulerr,'(a,a,a)') '*** Error: could not find absorption coefficients of gas "', &
+             &  gas_name, '" for photolysis in current ecCKD gas-optics scheme, and only O2 can be taken from the "composite" gas'
+        call radiation_abort('Radiation configuration error')
+      else
+        write(nulout,'(a)') 'Warning: assuming ecCKD "composite" gas includes molecular oxygen for photolysis cross sections'
+        i_target_gas = i_composite_gas
+      end if
+    else
+      write(nulout,'(a,a,a)') '  Reading ', trim(gas_name), ' photolysis cross sections from ecCKD'
+    end if
+
+    ! Extract absorption cross sections
+    nullify(molar_abs)
+    associate (single_gas => ckd_model%single_gas(i_target_gas))
+      if (single_gas%i_conc_dependence == IConcDependenceRelativeLinear) then
+        write(nulerr,'(a,a,a)') '*** Error: cannot extract photolysis cross section of "', gas_name, &
+             &  '" from CKD gas with a relative-linear concentration dependence'
+        call radiation_abort('Radiation configuration error')
+      else if  (single_gas%i_conc_dependence == IConcDependenceLUT) then
+        ! Interpolate from the molar absorption at the lowest
+        ! concentration level and the second highest pressure level
+        molar_abs => single_gas%molar_abs_conc(:,IRefPressure,:,1)
+      else
+        ! Interpolate from the molar absorption at the second
+        ! highest pressure level
+        molar_abs => single_gas%molar_abs(:,IRefPressure,:)
+      end if
+
+      do jtemp = 1,this%ntemperature
+        temperature = this%temperature1 + this%dtemperature*(jtemp-1)
+        i1 = 1 + floor((temperature - ckd_model%temperature1(IRefPressure)) / ckd_model%d_temperature)
+        if (i1 <= 0) then
+          i1 = 1
+          weight1 = 1.0_jprb
+        else if (i1 >= ckd_model%ntemp) then
+          i1 = ckd_model%ntemp-1
+          weight1 = 0.0_jprb
+        else
+          weight1 = (ckd_model%temperature1(IRefPressure) + i1*ckd_model%d_temperature - temperature) / ckd_model%d_temperature
+        end if
+        cross_section(:,jtemp) = weight1*molar_abs(:,i1) + (1.0_jprb-weight1)*molar_abs(:,i1+1)
+      end do
+
+      nullify(molar_abs)
+          
+      ! Convert from molar cross section to molecular cross section
+      if (i_target_gas == i_composite_gas) then
+        ! Assume we are dealing with oxygen as part of composite gas 
+        cross_section = cross_section / (O2NominalMoleFraction * AvogadroConstant)
+      else
+        cross_section = cross_section / AvogadroConstant
+      end if
+    end associate
+
+    if (lhook) call dr_hook('radiation_photolysis:get_absorption_from_ckd',1,hook_handle)
+
+  end subroutine get_absorption_from_ckd
+  
 end module radiation_photolysis
 

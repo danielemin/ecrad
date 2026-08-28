@@ -31,5 +31,6 @@ module radiation_constants
   real(jprb), parameter :: PlanckConstant     = 6.6260695729e-34_jprb ! J s
   real(jprb), parameter :: BoltzmannConstant  = 1.380648813e-23_jprb ! J K-1
   real(jprb), parameter :: SpeedOfLight       = 299792458.0_jprb ! m s-1
-
+  real(jprb), parameter :: AvogadroConstant   = 6.02214076e23_jprb ! mol-1
+  
 end module radiation_constants

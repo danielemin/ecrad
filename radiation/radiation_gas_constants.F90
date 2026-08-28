@@ -55,6 +55,8 @@ module radiation_gas_constants
        & 153.823_jprb,    & ! CCl4    
        & 46.0055_jprb /)    ! NO2
 
+  real(jprb), parameter :: O2NominalMoleFraction = 0.2095_jprb
+  
   ! The corresponding names of the gases in upper and lower case, used
   ! for reading variables from the input file
   character*6, dimension(NMaxGases), parameter :: GasName &
