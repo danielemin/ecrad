@@ -104,13 +104,18 @@ program ecrad_photolysis_driver
   ! Are any variables out of bounds?
   logical :: is_out_of_bounds
 
+  ! Do we do photolysis and if so do we output also the values at g points?
+  logical                      :: do_photolysis
+  logical                      :: do_photolysis_per_g_point
+  
   ! Do we store photolysis rates at half levels?
   logical :: do_half_level_photolysis_rates
 
   ! Photolysis data 
-  logical                      :: do_photolysis        
   type(photolysis_type)        :: photolysis
-  real(kind=jprb), allocatable :: photolysis_rate(:,:,:)
+  ! Output photolysis rates, s-1
+  real(kind=jprb), allocatable :: photolysis_rate(:,:,:)     ! (nproc,nlev,ncol)
+  real(kind=jprb), allocatable :: photolysis_rate_g(:,:,:,:) ! (ng,nproc,nlev,ncol)
   integer :: jcol
   
   ! Fortran array of strings to store required photolysis processes
@@ -181,6 +186,9 @@ program ecrad_photolysis_driver
   ! Natively photolysis is computed on half-levels, but can be
   ! converted to full-level values (see radiation_photolysis.F90)
   do_half_level_photolysis_rates = .true.
+
+  ! For diagnostic purposes, output the photolysis rates per g-point
+  do_photolysis_per_g_point = .false.
   
   photolysis_processes = [character(len=NMaxProcessNameLen) &
        &  :: "hobr", "br2", "brcl", "bro", "brono2_br", "brono2_bro", "chbr3", "cl2", "oclo", "cl2o2", &
@@ -307,6 +315,13 @@ program ecrad_photolysis_driver
     else
       allocate(photolysis_rate(photolysis%nproc,nlev,ncol))
     end if
+    if (do_photolysis_per_g_point) then
+      if (do_half_level_photolysis_rates) then
+        allocate(photolysis_rate_g(config%n_g_sw,photolysis%nproc,nlev+1,ncol))
+      else
+        allocate(photolysis_rate_g(config%n_g_sw,photolysis%nproc,nlev,ncol))
+      end if
+    end if
   end if
 
   if (driver_config%iverbose >= 2) then
@@ -350,8 +365,14 @@ program ecrad_photolysis_driver
 
         if (do_photolysis) then
           do jcol = istartcol,iendcol
-            call photolysis%calculate(jcol, single_level%cos_sza(jcol), &
-                 &  thermodynamics%temperature_hl(jcol,:), flux, photolysis_rate(:,:,jcol))
+            if (do_photolysis_per_g_point) then
+              call photolysis%calculate(jcol, single_level%cos_sza(jcol), &
+                   &  thermodynamics%temperature_hl(jcol,:), flux, photolysis_rate(:,:,jcol), &
+                   &  rates_g=photolysis_rate_g(:,:,:,jcol))
+            else
+              call photolysis%calculate(jcol, single_level%cos_sza(jcol), &
+                   &  thermodynamics%temperature_hl(jcol,:), flux, photolysis_rate(:,:,jcol))
+            end if
           end do
         end if
         
@@ -404,8 +425,14 @@ program ecrad_photolysis_driver
   end if
 
   if (do_photolysis) then
-    call photolysis%save(trim(photolysis_file_name), photolysis_rate, &
-         &               iverbose=driver_config%iverbose)
+    if (do_photolysis_per_g_point) then
+      call photolysis%save(trim(photolysis_file_name), photolysis_rate, &
+           &               iverbose=driver_config%iverbose, &
+           &               rates_g=photolysis_rate_g)
+    else
+      call photolysis%save(trim(photolysis_file_name), photolysis_rate, &
+           &               iverbose=driver_config%iverbose)
+    end if
   end if
   
   if (driver_config%iverbose >= 2) then
