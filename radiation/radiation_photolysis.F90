@@ -432,7 +432,7 @@ contains
   
   !---------------------------------------------------------------------
   ! Calculate photolysis rates from spectral fluxes
-  subroutine calculate(this, icol, mu0, temperature_hl, flux, rates, ilay1, ilay2)
+  subroutine calculate(this, icol, mu0, temperature_hl, flux, rates, ilay1, ilay2, rates_g)
 
     use radiation_flux,  only : flux_type
     use radiation_io,    only : nulerr, radiation_abort
@@ -451,6 +451,8 @@ contains
     real(jprb),                  intent(out) :: rates(:,:) ! (nproc,nlay)
     ! Optional range of layers to process    
     integer, optional,           intent(in)  :: ilay1, ilay2
+    ! Optional output photodissociation rates per-g point (s-1)
+    real(jprb), optional,        intent(out) :: rates_g(:,:,:) ! (ng,nproc,nlay)
 
     ! Actinic flux at a half-level
     real(jprb) :: actinic_flux(this%ng)
@@ -460,12 +462,15 @@ contains
 
     ! Rates at half-levels
     real(jprb), allocatable :: rates_hl(:,:)
+
+    ! Rates at half-levels per g-point
+    real(jprb), allocatable :: rates_g_hl(:,:,:)
     
     integer :: il1, il2
 
     integer :: nlay
 
-    integer :: jlev, jlay, jproc
+    integer :: jlev, jlay, jproc, jg
 
     ! Index
     integer :: itemp
@@ -503,6 +508,10 @@ contains
       nlay = il2-il1+1
 
       allocate(rates_hl(this%nproc,nlay+1))
+
+      if (present(rates_g)) then
+        allocate(rates_g_hl(this%ng,this%nproc,nlay+1))
+      end if
       
       ! Loop over half-levels
       do jlev = il1,il2+1
@@ -530,11 +539,22 @@ contains
              &        +             wtemp  * this%cross_section_lut(:,:,itemp+1)
         
         rates_hl(:,jlev) = matmul(cross_section, actinic_flux)
+
+        if (present(rates_g)) then
+          do jproc = 1,this%nproc
+            do jg = 1,this%ng
+              rates_g_hl(jg,jproc,jlev) = cross_section(jproc,jg) * actinic_flux(jg)
+            end do
+          end do
+        end if
       end do
 
       if (this%do_half_level_rates) then
         ! Copy the half-level rates to the output array
         rates = rates_hl
+        if (present(rates_g)) then
+          rates_g = rates_g_hl
+        end if
       else
         ! Loop over full levels
         do jlay = il1,il2
@@ -556,10 +576,34 @@ contains
             end if
           end do
         end do
+        if (present(rates_g)) then
+          ! Loop over full levels
+          do jlay = il1,il2
+            do jg = 1,this%ng
+              if (rates_hl(jproc,jlay+1) > 0.99_jprb * rates_hl(jproc,jlay)) then
+                ! Optically thin layer: very small vertical variation of
+                ! rates so take average of values at top and bottom
+                ! of layer
+                rates(jproc,jlay) = 0.5_jprb * (rates_hl(jproc,jlay) + rates_hl(jproc,jlay+1))
+              else if (rates_hl(jproc,jlay) <= 0.0_jprb) then
+                ! No flux
+                rates(jproc,jlay) = 0.0_jprb
+              else
+                ! Assume an exponential variation of actinic flux through
+                ! the layer and calculate the layer-mean value
+                rates(jproc,jlay) = (rates_hl(jproc,jlay+1) - rates_hl(jproc,jlay)) &
+                     &      / log(max(rates_hl(jproc,jlay+1)/rates_hl(jproc,jlay),tiny(1.0_jprb)))
+              end if
+            end do
+          end do
+        end if
       end if
     else
       ! Sun below horizon
       rates(:,:) = 0.0_jprb
+      if (present(rates_g)) then
+        rates_g(:,:,:) = 0.0_jprb
+      end if
     end if
     
     if (lhook) call dr_hook('radiation_photolysis:calculate',1,hook_handle)
@@ -569,19 +613,21 @@ contains
   
   !---------------------------------------------------------------------
   ! Save computed photolysis rates to a netCDF file
-  subroutine save(this, file_name, rates, iverbose)
+  subroutine save(this, file_name, rates, rates_g, iverbose)
 
     use easy_netcdf,     only : netcdf_file
     !use radiation_io,    only : nulout, nulerr, radiation_abort
     use yomhook,         only : lhook, dr_hook, jphook
 
-    class(photolysis_type), intent(inout) :: this
+    class(photolysis_type),      intent(inout) :: this
     ! Name of file containing photolysis cross-sections
     character(len=*),            intent(in)    :: file_name
     ! Photolysis rates (s-1) dimensioned (nproc,nlay,ncol)
-    real(kind=jprb), allocatable :: rates(:,:,:)
+    real(kind=jprb),             intent(in)    :: rates(:,:,:)
+    ! Photolysis rates (s-1) per g-point, dimensioned (ng,nproc,nlay,ncol)
+    real(kind=jprb), optional,   intent(in)    :: rates_g(:,:,:,:)
     ! Verbosity level from 1 (least) to 5 (most verbose)
-    integer, optional,     intent(in)    :: iverbose
+    integer,         optional,   intent(in)    :: iverbose
 
     ! Object for output NetCDF file
     type(netcdf_file) :: out_file
@@ -614,6 +660,10 @@ contains
       call out_file%define_dimension("level",  nlev)
     end if
 
+    if (present(rates_g)) then
+      call out_file%define_dimension("ng", size(rates_g,1))
+    end if
+    
     ! Put global attributes
     call out_file%put_global_attributes( &
          &   title_str="Photolysis rates computed from the ecRad offline radiation model", &
@@ -631,6 +681,17 @@ contains
              &  long_name=trim(this%process_names(jproc)) // " photolysis rate", units_str="s-1", &
              &  dim2_name="column", dim1_name="level")
       end if
+      if (present(rates_g)) then
+        if (this%do_half_level_rates) then
+          call out_file%define_variable(trim(this%process_names(jproc)) // "_photolysis_rate_g_hl", &
+               &  long_name=trim(this%process_names(jproc)) // " photolysis rate per spectral g-point at half-levels", units_str="s-1", &
+               &  dim3_name="column", dim2_name="half_level", dim1_name="ng")
+        else
+          call out_file%define_variable(trim(this%process_names(jproc)) // "_photolysis_rate_g", &
+               &  long_name=trim(this%process_names(jproc)) // " photolysis rate per spectral g-point", units_str="s-1", &
+               &  dim3_name="column", dim2_name="level", dim1_name="ng")
+        end if
+      end if
     end do
 
     do jproc = 1,this%nproc
@@ -640,7 +701,16 @@ contains
         call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate", rates(jproc,:,:))
       end if
     end do
-
+    if (present(rates_g)) then
+      do jproc = 1,this%nproc
+        if (this%do_half_level_rates) then
+          call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate_g_hl", rates_g(:,jproc,:,:))
+        else
+          call out_file%put(trim(this%process_names(jproc)) // "_photolysis_rate_g", rates_g(:,jproc,:,:))
+        end if
+      end do
+    end if
+    
     call out_file%close()
 
     if (lhook) call dr_hook('radiation_photolysis:save',1,hook_handle)
